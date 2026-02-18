@@ -5,7 +5,6 @@ import argparse
 import logging
 import sys
 import subprocess
-import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
