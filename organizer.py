@@ -1,5 +1,6 @@
 import os
 import shutil
+import argparse
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -50,7 +51,9 @@ def extract_text(file_path: Path) -> str:
     text = ""
     try:
         if ext == ".txt":
-            text = file_path.read_text(errors='ignore')
+            # Limit to first 100KB for safety
+            with file_path.open(errors='ignore') as f:
+                text = f.read(100_000)
         elif ext == ".pdf" and HAS_PDF:
             reader = PdfReader(file_path)
             meta = reader.metadata
@@ -80,24 +83,35 @@ def classify(file_path: Path) -> Optional[str]:
     return max(scores, key=lambda k: scores[k])
 
 def get_safe_path(dest_dir: Path, filename: str) -> Path:
-    """Handles duplicate filenames with timestamps."""
+    """Handles duplicate filenames with counter (file (1).txt)."""
     dest_path = dest_dir / filename
     if not dest_path.exists():
         return dest_path
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
     path_obj = Path(filename)
-    return dest_dir / f"{path_obj.stem}_{ts}{path_obj.suffix}"
+    counter = 1
+    while counter < 1000:
+        new_name = f"{path_obj.stem} ({counter}){path_obj.suffix}"
+        if not (dest_dir / new_name).exists():
+            return dest_dir / new_name
+        counter += 1
+    return dest_dir / f"{path_obj.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{path_obj.suffix}"
 
-def organize(folder: Path):
+def organize(folder: Path, dry_run: bool = True) -> tuple[int, int, int]:
+    moved, skipped, errors = 0, 0, 0
     if not folder.exists():
-        return
-    logging.info(f"--- Organizing: {folder} ---")
+        logging.warning(f"Folder not found: {folder}")
+        return 0, 0, 0
+    
+    logging.info(f"--- Organizing: {folder} {'(DRY RUN)' if dry_run else ''} ---")
     
     # Create basic category folders
-    for cat in list(CATEGORIES.keys()) + ["Misc"]:
-        (folder / cat).mkdir(exist_ok=True)
+    if not dry_run:
+        for cat in list(CATEGORIES.keys()) + ["Misc"]:
+            (folder / cat).mkdir(exist_ok=True)
 
-    for item in folder.iterdir():
+    # Use list() to avoid issues with modifying the directory while iterating
+    for item in list(folder.iterdir()):
         if item.is_dir() or item.name.startswith('.'):
             continue
 
@@ -115,20 +129,57 @@ def organize(folder: Path):
             sub_cat = classify(item)
             if sub_cat:
                 dest_dir = dest_dir / sub_cat
-                dest_dir.mkdir(exist_ok=True)
             else:
                 dest_dir = dest_dir / "Misc"
-                dest_dir.mkdir(exist_ok=True)
+        
+        # Ensure destination exists
+        if not dry_run and not dest_dir.exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
 
         # Move file safely
         final_dest = get_safe_path(dest_dir, item.name)
         try:
-            shutil.move(str(item), str(final_dest))
-            logging.info(f"Moved: {item.name} -> {dest_dir.name}/")
+            if dry_run:
+                logging.info(f"[DRY RUN] Would move: {item.name} -> {dest_dir.name}/{final_dest.name}")
+            else:
+                shutil.move(str(item), str(final_dest))
+                logging.info(f"Moved: {item.name} -> {dest_dir.name}/{final_dest.name}")
+            moved += 1
         except Exception as e:
             logging.error(f"Error moving {item.name}: {e}")
+            errors += 1
+            
+    return moved, skipped, errors
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Organize files in Downloads and Documents.")
+    parser.add_argument("--run", action="store_true", help="Execute the moves (disable dry-run)")
+    args = parser.parse_args()
+
+    dry_run = not args.run
+    
+    # Check dependencies
+    if not HAS_PDF:
+        logging.warning("⚠️  'pypdf' not installed. PDF content analysis disabled.")
+    if not HAS_DOCX:
+        logging.warning("⚠️  'python-docx' not installed. DOCX content analysis disabled.")
+
+    if dry_run:
+        print("\n🔍 DRY RUN MODE: No files will be moved. Use --run to execute.\n")
+
+    total_moved = 0
+    total_errors = 0
+
     for folder in FOLDERS_TO_ORGANIZE:
-        organize(folder)
-    print("\nOrganization complete!")
+        m, s, e = organize(folder, dry_run=dry_run)
+        total_moved += m
+        total_errors += e
+    
+    print(f"\n--- Summary ---")
+    print(f"Total Files Processed: {total_moved + total_errors}")
+    print(f"Successful Moves: {total_moved}")
+    print(f"Errors: {total_errors}")
+    if dry_run:
+        print("\n(This was a dry run. No changes were made.)")
+    else:
+        print("\nOrganization complete!")
