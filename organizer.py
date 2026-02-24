@@ -7,6 +7,7 @@ import sys
 import subprocess
 import json
 import hashlib
+import fnmatch
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
@@ -90,17 +91,38 @@ DEFAULT_CONTENT_CATEGORIES = {
     "Legal": ["agreement", "legal", "court", "affidavit", "notary", "law", "signed"],
 }
 
+# System junk files to skip by default
+DEFAULT_EXCLUDES = [".DS_Store", "Thumbs.db", "desktop.ini", ".localized", "Icon\r", ".Spotlight-V100", ".Trashes"]
+
+
 def load_config(config_path: Path) -> tuple[Dict, Dict]:
     """Loads configuration from a JSON file."""
     if config_path.exists():
         try:
             with config_path.open() as f:
                 data = json.load(f)
-                return (data.get("CATEGORIES", DEFAULT_CATEGORIES), 
+                return (data.get("CATEGORIES", DEFAULT_CATEGORIES),
                         data.get("CONTENT_CATEGORIES", DEFAULT_CONTENT_CATEGORIES))
         except Exception as e:
             logging.error(f"Failed to load config: {e}. Using defaults.")
     return DEFAULT_CATEGORIES, DEFAULT_CONTENT_CATEGORIES
+
+
+def check_permissions(folders: List[Path]):
+    """Warn if macOS Full Disk Access may be needed for the given folders."""
+    if sys.platform != "darwin":
+        return
+    for folder in folders:
+        if not folder.exists():
+            continue
+        try:
+            list(folder.iterdir())
+        except PermissionError:
+            print(f"\nWARNING: Cannot access '{folder}'.")
+            print("  On macOS, this script may need Full Disk Access.")
+            print("  Go to: System Settings > Privacy & Security > Full Disk Access")
+            print("  Add Terminal (or your Python interpreter) to the list.\n")
+
 
 def extract_text(file_path: Path) -> str:
     """Extracts text from various file formats."""
@@ -112,11 +134,9 @@ def extract_text(file_path: Path) -> str:
                 text = f.read(100_000)
         elif ext == ".pdf" and HAS_PDF:
             reader = PdfReader(file_path)
-            # Check metadata
             meta = reader.metadata
             if meta:
                 text += f" {meta.get('/Title', '')} {meta.get('/Subject', '')} "
-            # Extract from first few pages
             for page in reader.pages[:5]:
                 text += page.extract_text() or ""
         elif ext == ".docx" and HAS_DOCX:
@@ -124,7 +144,7 @@ def extract_text(file_path: Path) -> str:
             text = "\n".join([p.text for p in doc.paragraphs[:50]])
         elif ext == ".xlsx" and HAS_EXCEL:
             wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
-            for sheet in wb.worksheets[:3]:  # First 3 sheets
+            for sheet in wb.worksheets[:3]:
                 for row in sheet.iter_rows(max_row=50, values_only=True):
                     text += " ".join([str(v) for v in row if v]) + " "
         elif ext == ".pptx" and HAS_PPTX:
@@ -137,23 +157,24 @@ def extract_text(file_path: Path) -> str:
         logging.debug(f"Could not read content from {file_path.name}: {e}")
     return text.lower()
 
+
 def classify(file_path: Path, content_categories: Dict) -> Optional[str]:
     """Classifies documents based on filename and content."""
     text = extract_text(file_path)
     content = f"{file_path.name} {text}".lower()
-    
+
     scores = {cat: 0 for cat in content_categories}
     for cat, keywords in content_categories.items():
         for kw in keywords:
             if kw.lower() in content:
-                # Weight filename hits higher than content hits
-                scores[cat] += (content.count(kw.lower()))
+                scores[cat] += content.count(kw.lower())
                 if kw.lower() in file_path.name.lower():
-                    scores[cat] += 5 
-                    
+                    scores[cat] += 5
+
     if not any(scores.values()):
         return None
     return max(scores, key=lambda k: scores[k])
+
 
 def file_hash(path: Path) -> str:
     """Returns MD5 hash of a file for duplicate content detection."""
@@ -165,6 +186,7 @@ def file_hash(path: Path) -> str:
         return h.hexdigest()
     except Exception:
         return ""
+
 
 def build_hash_index(folder: Path) -> Dict[str, Path]:
     """Scan ALL files in folder recursively. Returns hash -> path of the oldest copy (the original)."""
@@ -178,13 +200,58 @@ def build_hash_index(folder: Path) -> Dict[str, Path]:
         if h not in index:
             index[h] = f
         else:
-            # Keep the older file as the "original"
             try:
                 if f.stat().st_mtime < index[h].stat().st_mtime:
                     index[h] = f
             except OSError:
                 pass
     return index
+
+
+def build_combined_hash_index(folders: List[Path]) -> Dict[str, Path]:
+    """Build a single hash index across multiple folders for cross-folder duplicate detection."""
+    index: Dict[str, Path] = {}
+    for folder in folders:
+        if not folder.exists():
+            continue
+        logging.info(f"Scanning for duplicates: {folder}")
+        for f in folder.rglob("*"):
+            if not f.is_file() or f.name.startswith('.'):
+                continue
+            h = file_hash(f)
+            if not h:
+                continue
+            if h not in index:
+                index[h] = f
+            else:
+                try:
+                    if f.stat().st_mtime < index[h].stat().st_mtime:
+                        index[h] = f
+                except OSError:
+                    pass
+    return index
+
+
+def clean_empty_dirs(folder: Path) -> int:
+    """Remove empty directories inside folder after organizing. Returns count removed."""
+    removed = 0
+    # Sort deepest paths first so nested empty dirs are removed before parents
+    for dirpath in sorted(folder.rglob("*"), reverse=True):
+        if dirpath == folder or not dirpath.is_dir():
+            continue
+        try:
+            if not any(dirpath.iterdir()):
+                dirpath.rmdir()
+                try:
+                    rel = dirpath.relative_to(folder)
+                except ValueError:
+                    rel = dirpath
+                logging.info(f"Removed empty dir: {rel}")
+                removed += 1
+        except Exception as e:
+            logging.debug(f"Could not remove {dirpath}: {e}")
+    return removed
+
 
 def get_safe_path(dest_dir: Path, filename: str) -> Path:
     """Handles duplicate filenames."""
@@ -202,7 +269,9 @@ def get_safe_path(dest_dir: Path, filename: str) -> Path:
         counter += 1
     return dest_dir / f"{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
 
+
 UNDO_LOG = Path.home() / ".organizer_undo.json"
+
 
 def load_undo_log() -> List[Dict]:
     if UNDO_LOG.exists():
@@ -213,9 +282,11 @@ def load_undo_log() -> List[Dict]:
             return []
     return []
 
+
 def save_undo_log(entries: List[Dict]):
     with UNDO_LOG.open("w") as f:
         json.dump(entries, f, indent=2)
+
 
 def undo_last_run():
     entries = load_undo_log()
@@ -247,12 +318,15 @@ def undo_last_run():
     save_undo_log(remaining)
     print(f"\nRestored: {success}, Errors: {errors}")
 
+
 def organize(folder: Path, categories: Dict, content_categories: Dict,
              dry_run: bool = True, by_date: bool = False, recursive: bool = False,
-             session_id: str = "") -> tuple[int, int, Dict[str, int], List[Dict]]:
+             session_id: str = "", exclude: Optional[List[str]] = None,
+             hash_index: Optional[Dict[str, Path]] = None) -> tuple[int, int, Dict[str, int], List[Dict]]:
     moved, errors = 0, 0
     category_counts: Dict[str, int] = {}
     move_log: List[Dict] = []
+    skip_names = set(exclude or DEFAULT_EXCLUDES)
 
     if not folder.exists():
         logging.warning(f"Folder not found: {folder}")
@@ -260,9 +334,10 @@ def organize(folder: Path, categories: Dict, content_categories: Dict,
 
     logging.info(f"--- Organizing: {folder} {'(DRY RUN)' if dry_run else ''} ---")
 
-    # Scan ALL files in folder (including existing subfolders) to build duplicate index
-    logging.info("Scanning all locations for duplicates...")
-    hash_index = build_hash_index(folder)
+    # Use a passed-in hash index (cross-folder) or build one for this folder only
+    if hash_index is None:
+        logging.info("Scanning all locations for duplicates...")
+        hash_index = build_hash_index(folder)
 
     # Known category dirs — skip files already organized into them
     known_cats = set(categories.keys()) | {"Misc", "Duplicates"}
@@ -271,6 +346,11 @@ def organize(folder: Path, categories: Dict, content_categories: Dict,
 
     for item in items:
         if item.is_dir() or item.name.startswith('.') or any(part.startswith('.') for part in item.parts):
+            continue
+
+        # Skip excluded filenames/patterns
+        if any(fnmatch.fnmatch(item.name, pat) for pat in skip_names):
+            logging.debug(f"Excluded: {item.name}")
             continue
 
         # Skip files already inside an organized subfolder
@@ -345,6 +425,7 @@ def organize(folder: Path, categories: Dict, content_categories: Dict,
 
     return moved, errors, category_counts, move_log
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Organize files logically.")
     parser.add_argument("folders", nargs="*", help="Folders to organize (defaults to Downloads and Documents)")
@@ -352,8 +433,19 @@ if __name__ == "__main__":
     parser.add_argument("--undo", action="store_true", help="Undo the last run")
     parser.add_argument("--by-date", action="store_true", help="Organize by year/month")
     parser.add_argument("--recursive", action="store_true", help="Organize subfolders too")
+    parser.add_argument("--clean-empty-dirs", action="store_true", help="Remove empty folders after organizing")
+    parser.add_argument("--exclude", action="append", metavar="PATTERN",
+                        help="Skip files matching this name/pattern (e.g. '*.tmp'). Can be used multiple times.")
+    parser.add_argument("--log-file", type=str, metavar="PATH", help="Save log output to this file")
     parser.add_argument("--config", type=str, default="config.json", help="Path to config JSON")
     args = parser.parse_args()
+
+    # Set up file logging if requested
+    if args.log_file:
+        file_handler = logging.FileHandler(args.log_file, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        logging.getLogger().addHandler(file_handler)
+        print(f"Logging to: {args.log_file}")
 
     if args.undo:
         undo_last_run()
@@ -362,8 +454,16 @@ if __name__ == "__main__":
     folders = [Path(f) for f in args.folders] if args.folders else [Path.home() / "Downloads", Path.home() / "Documents"]
     categories, content_categories = load_config(Path(args.config))
 
+    # Check macOS permissions upfront
+    check_permissions(folders)
+
     if not args.run:
         print("\nDRY RUN MODE: Use --run to execute.\n")
+
+    # Build a single shared hash index across ALL folders to catch cross-folder duplicates
+    exclude_patterns = args.exclude if args.exclude else DEFAULT_EXCLUDES
+    print("Building duplicate index across all folders...")
+    shared_hash_index = build_combined_hash_index(folders)
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     t_moved, t_errors = 0, 0
@@ -374,13 +474,22 @@ if __name__ == "__main__":
         m, e, cats, moves = organize(
             folder, categories, content_categories,
             dry_run=not args.run, by_date=args.by_date,
-            recursive=args.recursive, session_id=session_id
+            recursive=args.recursive, session_id=session_id,
+            exclude=exclude_patterns, hash_index=shared_hash_index,
         )
         t_moved += m
         t_errors += e
         all_moves.extend(moves)
         for cat, count in cats.items():
             t_categories[cat] = t_categories.get(cat, 0) + count
+
+    # Clean up empty directories if requested (only on actual run)
+    if args.run and args.clean_empty_dirs:
+        total_removed = 0
+        for folder in folders:
+            total_removed += clean_empty_dirs(folder)
+        if total_removed:
+            print(f"Removed {total_removed} empty director{'y' if total_removed == 1 else 'ies'}.")
 
     if args.run and all_moves:
         existing_log = load_undo_log()
