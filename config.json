@@ -1,0 +1,98 @@
+{
+    "CATEGORIES": {
+        "Documents": [
+            ".pdf",
+            ".docx",
+            ".doc",
+            ".txt",
+            ".xlsx",
+            ".pptx",
+            ".csv"
+        ],
+        "Images": [
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".svg",
+            ".webp",
+            ".heic"
+        ],
+        "Videos": [
+            ".mp4",
+            ".mov",
+            ".avi",
+            ".mkv"
+        ],
+        "Archives": [
+            ".zip",
+            ".tar",
+            ".gz",
+            ".rar",
+            ".7z"
+        ],
+        "Music": [
+            ".mp3",
+            ".wav",
+            ".flac",
+            ".m4a"
+        ],
+        "Applications": [
+            ".dmg",
+            ".pkg",
+            ".app"
+        ],
+        "Code": [
+            ".py",
+            ".js",
+            ".html",
+            ".css",
+            ".json",
+            ".sh"
+        ]
+    },
+    "CONTENT_CATEGORIES": {
+        "Financial": [
+            "invoice",
+            "bill",
+            "receipt",
+            "tax",
+            "bank",
+            "statement",
+            "payment",
+            "chequing",
+            "banking",
+            "account",
+            "credit",
+            "debit"
+        ],
+        "Work": [
+            "project",
+            "report",
+            "meeting",
+            "resume",
+            "proposal",
+            "contract",
+            "leads",
+            "sales",
+            "franchise"
+        ],
+        "HR-Jobs": [
+            "hr",
+            "job",
+            "hiring",
+            "salary",
+            "benefits",
+            "employee"
+        ],
+        "Legal": [
+            "agreement",
+            "legal",
+            "court",
+            "affidavit",
+            "notary",
+            "law",
+            "signed"
+        ]
+    }
+}
