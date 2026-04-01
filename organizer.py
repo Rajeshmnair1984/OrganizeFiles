@@ -1,23 +1,52 @@
+#!/usr/bin/env python3
 import os
 import shutil
 import argparse
+import logging
+import sys
+import subprocess
 import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
-# Optional dependencies for content analysis
+def install(package):
+    """Install a package using pip."""
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+        return True
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to install {package}: {e}")
+        return False
+
+# Auto-install dependencies
 try:
     from pypdf import PdfReader
     HAS_PDF = True
 except ImportError:
-    HAS_PDF = False
+    print("Installing pypdf for PDF support...")
+    if install("pypdf"):
+        try:
+            from pypdf import PdfReader
+            HAS_PDF = True
+        except ImportError:
+            HAS_PDF = False
+    else:
+        HAS_PDF = False
 
 try:
     from docx import Document
     HAS_DOCX = True
 except ImportError:
-    HAS_DOCX = False
+    print("Installing python-docx for DOCX support...")
+    if install("python-docx"):
+        try:
+            from docx import Document
+            HAS_DOCX = True
+        except ImportError:
+            HAS_DOCX = False
+    else:
+        HAS_DOCX = False
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
