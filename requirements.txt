@@ -1,6 +1,4 @@
 pypdf
 python-docx
-
-
-cd "/Users/raj/Documents/GitHub/organize Files/OrganizeFiles-"
-python3 organizer.py ~/Downloads --run
+openpyxl
+python-pptx

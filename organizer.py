@@ -8,6 +8,7 @@ import subprocess
 import json
 import hashlib
 import fnmatch
+import stat as stat_module
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
@@ -163,12 +164,15 @@ def classify(file_path: Path, content_categories: Dict) -> Optional[str]:
     text = extract_text(file_path)
     content = f"{file_path.name} {text}".lower()
 
+    name = file_path.name.lower()
     scores = {cat: 0 for cat in content_categories}
     for cat, keywords in content_categories.items():
         for kw in keywords:
-            if kw.lower() in content:
-                scores[cat] += content.count(kw.lower())
-                if kw.lower() in file_path.name.lower():
+            kw = kw.lower()
+            n = content.count(kw)
+            if n:
+                scores[cat] += n
+                if kw in name:
                     scores[cat] += 5
 
     if not any(scores.values()):
@@ -188,39 +192,35 @@ def file_hash(path: Path) -> str:
         return ""
 
 
-def build_hash_index(folder: Path) -> Dict[str, Path]:
-    """Scan ALL files in folder recursively. Returns hash -> path of the oldest copy (the original)."""
-    index: Dict[str, Path] = {}
-    for f in folder.rglob("*"):
-        if not f.is_file() or f.name.startswith('.'):
-            continue
-        h = file_hash(f)
-        if not h:
-            continue
-        if h not in index:
-            index[h] = f
-        else:
-            try:
-                if f.stat().st_mtime < index[h].stat().st_mtime:
-                    index[h] = f
-            except OSError:
-                pass
-    return index
-
-
-def build_combined_hash_index(folders: List[Path]) -> Dict[str, Path]:
-    """Build a single hash index across multiple folders for cross-folder duplicate detection."""
-    index: Dict[str, Path] = {}
+def build_hash_index(folders: List[Path]) -> tuple[Dict[str, Path], Dict[Path, str]]:
+    """Hash index across folders. Only files sharing a byte size can be duplicates,
+    so unique-size files are never read. Returns (hash -> oldest path, path -> hash)."""
+    by_size: Dict[int, List[Path]] = {}
     for folder in folders:
         if not folder.exists():
             continue
         logging.info(f"Scanning for duplicates: {folder}")
         for f in folder.rglob("*"):
-            if not f.is_file() or f.name.startswith('.'):
+            if f.name.startswith('.'):
                 continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if not stat_module.S_ISREG(st.st_mode):
+                continue
+            by_size.setdefault(st.st_size, []).append(f)
+
+    index: Dict[str, Path] = {}
+    hashes: Dict[Path, str] = {}
+    for size, paths in by_size.items():
+        if len(paths) < 2 or size == 0:
+            continue
+        for f in paths:
             h = file_hash(f)
             if not h:
                 continue
+            hashes[f] = h
             if h not in index:
                 index[h] = f
             else:
@@ -229,7 +229,7 @@ def build_combined_hash_index(folders: List[Path]) -> Dict[str, Path]:
                         index[h] = f
                 except OSError:
                     pass
-    return index
+    return index, hashes
 
 
 def clean_empty_dirs(folder: Path) -> int:
@@ -322,7 +322,8 @@ def undo_last_run():
 def organize(folder: Path, categories: Dict, content_categories: Dict,
              dry_run: bool = True, by_date: bool = False, recursive: bool = False,
              session_id: str = "", exclude: Optional[List[str]] = None,
-             hash_index: Optional[Dict[str, Path]] = None) -> tuple[int, int, Dict[str, int], List[Dict]]:
+             hash_index: Optional[Dict[str, Path]] = None,
+             hashes: Optional[Dict[Path, str]] = None) -> tuple[int, int, Dict[str, int], List[Dict]]:
     moved, errors = 0, 0
     category_counts: Dict[str, int] = {}
     move_log: List[Dict] = []
@@ -337,7 +338,8 @@ def organize(folder: Path, categories: Dict, content_categories: Dict,
     # Use a passed-in hash index (cross-folder) or build one for this folder only
     if hash_index is None:
         logging.info("Scanning all locations for duplicates...")
-        hash_index = build_hash_index(folder)
+        hash_index, hashes = build_hash_index([folder])
+    hashes = hashes or {}
 
     # Known category dirs — skip files already organized into them
     known_cats = set(categories.keys()) | {"Misc", "Duplicates"}
@@ -362,7 +364,7 @@ def organize(folder: Path, categories: Dict, content_categories: Dict,
             pass
 
         # Check if this file is a duplicate of something already elsewhere in the folder tree
-        h = file_hash(item)
+        h = hashes.get(item)
         original = hash_index.get(h) if h else None
         is_dup = original is not None and original.resolve() != item.resolve()
 
@@ -463,7 +465,7 @@ if __name__ == "__main__":
     # Build a single shared hash index across ALL folders to catch cross-folder duplicates
     exclude_patterns = args.exclude if args.exclude else DEFAULT_EXCLUDES
     print("Building duplicate index across all folders...")
-    shared_hash_index = build_combined_hash_index(folders)
+    shared_hash_index, shared_hashes = build_hash_index(folders)
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     t_moved, t_errors = 0, 0
@@ -476,6 +478,7 @@ if __name__ == "__main__":
             dry_run=not args.run, by_date=args.by_date,
             recursive=args.recursive, session_id=session_id,
             exclude=exclude_patterns, hash_index=shared_hash_index,
+            hashes=shared_hashes,
         )
         t_moved += m
         t_errors += e
